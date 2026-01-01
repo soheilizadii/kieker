@@ -26,42 +26,90 @@ import kieker.analysis.generic.IEventMatcher;
 import kieker.analysis.generic.ImplementsEventMatcher;
 import kieker.analysis.generic.source.rewriter.NoneTraceMetadataRewriter;
 import kieker.analysis.generic.source.tcp.MultipleConnectionTcpSourceStage;
+import kieker.analysis.stage.kafka.KafkaOperationExecutionRecordConsumerStage;
 import kieker.common.record.IMonitoringRecord;
 import kieker.common.record.controlflow.OperationExecutionRecord;
 import kieker.model.repository.SystemModelRepository;
 import kieker.tools.oteltransformer.stages.OpenTelemetryExporterStage;
-
+import kieker.tools.oteltransformer.stages.OperationExecutionRecordMatchedStage;
+import kieker.tools.oteltransformer.stages.RecordReceiveMetricStage;
 import teetime.framework.Configuration;
 
 /**
  * A configuration for exporting Kieker data to OpenTelemetry.
- * 
+ *
+ * Supports two input modes:
+ *  - TCP input (default): TeaStore -> transformer TCP source
+ *  - Kafka input: Kafka -> transformer consumer group (partition->pod affinity)
+ *
  * @author DaGeRe
  */
 public class OpenTelemetryExportConfiguration extends Configuration {
 
-	public OpenTelemetryExportConfiguration(final int inputPort, final int bufferSize, final kieker.common.configuration.Configuration configuration) {
-		final MultipleConnectionTcpSourceStage source = new MultipleConnectionTcpSourceStage(inputPort, bufferSize, new NoneTraceMetadataRewriter());
+	/**
+	 * TCP input mode constructor (original behaviour).
+	 */
+	public OpenTelemetryExportConfiguration(final int inputPort,
+											final int bufferSize,
+											final kieker.common.configuration.Configuration configuration) {
+
+		final MultipleConnectionTcpSourceStage source =
+				new MultipleConnectionTcpSourceStage(inputPort, bufferSize, new NoneTraceMetadataRewriter());
+
+		buildPipeline(source.getOutputPort(), configuration);
+	}
+
+	/**
+	 * Kafka input mode constructor.
+	 *
+	 * @param bootstrapServers Kafka bootstrap servers, e.g. "kafka:9092"
+	 * @param topic            topic name, e.g. "kieker-records"
+	 * @param groupId          consumer group id (MUST be the same for all transformer pods)
+	 */
+	public OpenTelemetryExportConfiguration(final String bootstrapServers,
+											final String topic,
+											final String groupId,
+											final kieker.common.configuration.Configuration configuration) {
+
+		final KafkaOperationExecutionRecordConsumerStage source =
+				new KafkaOperationExecutionRecordConsumerStage(bootstrapServers, topic, groupId);
+
+		buildPipeline(source.getOutputPort(), configuration);
+	}
+
+	/**
+	 * Common pipeline after the source stage:
+	 * source -> counter -> metrics -> dispatcher -> match -> transform -> reconstruct -> OTEL export
+	 */
+	private void buildPipeline(final teetime.framework.OutputPort<IMonitoringRecord> sourceOutputPort,
+							   final kieker.common.configuration.Configuration configuration) {
 
 		final CountingStage<IMonitoringRecord> counter = new CountingStage<>(true, 1000);
-
-		connectPorts(source.getOutputPort(), counter.getInputPort());
+		connectPorts(sourceOutputPort, counter.getInputPort());
 
 		final DynamicEventDispatcher dispatcher = new DynamicEventDispatcher(null, false, true, false);
-		final IEventMatcher<? extends OperationExecutionRecord> operationExecutionRecordMatcher = new ImplementsEventMatcher<>(OperationExecutionRecord.class, null);
+		final IEventMatcher<? extends OperationExecutionRecord> operationExecutionRecordMatcher =
+				new ImplementsEventMatcher<>(OperationExecutionRecord.class, null);
 		dispatcher.registerOutput(operationExecutionRecordMatcher);
-		this.connectPorts(counter.getRelayedEventsOutputPort(), dispatcher.getInputPort());
+
+		final RecordReceiveMetricStage recordMetricStage = new RecordReceiveMetricStage();
+		connectPorts(counter.getRelayedEventsOutputPort(), recordMetricStage.getInputPort());
+		connectPorts(recordMetricStage.getOutputPort(), dispatcher.getInputPort());
 
 		final SystemModelRepository repository = new SystemModelRepository();
-		final ExecutionRecordTransformationStage executionRecordTransformationStage = new ExecutionRecordTransformationStage(repository);
 
-		this.connectPorts(operationExecutionRecordMatcher.getOutputPort(), executionRecordTransformationStage.getInputPort());
+		final OperationExecutionRecordMatchedStage matchedStage = new OperationExecutionRecordMatchedStage();
+		connectPorts(operationExecutionRecordMatcher.getOutputPort(), matchedStage.getInputPort());
 
-		final TraceReconstructionStage traceReconstructionStage = new TraceReconstructionStage(repository, TimeUnit.MILLISECONDS, true, 10000L);
-		this.connectPorts(executionRecordTransformationStage.getOutputPort(), traceReconstructionStage.getInputPort());
+		final ExecutionRecordTransformationStage executionRecordTransformationStage =
+				new ExecutionRecordTransformationStage(repository);
+		connectPorts(matchedStage.getOutputPort(), executionRecordTransformationStage.getInputPort());
+
+		final TraceReconstructionStage traceReconstructionStage =
+				new TraceReconstructionStage(repository, TimeUnit.MILLISECONDS, true, 10000L);
+		connectPorts(executionRecordTransformationStage.getOutputPort(), traceReconstructionStage.getInputPort());
 
 		final OpenTelemetryExporterStage otstage = new OpenTelemetryExporterStage(configuration);
-		this.connectPorts(traceReconstructionStage.getExecutionTraceOutputPort(), otstage.getInputPort());
-
+		connectPorts(traceReconstructionStage.getExecutionTraceOutputPort(), otstage.getInputPort());
 	}
 }

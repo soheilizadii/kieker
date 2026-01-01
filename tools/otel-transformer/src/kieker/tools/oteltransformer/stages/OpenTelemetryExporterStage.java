@@ -44,7 +44,7 @@ import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import teetime.framework.AbstractConsumerStage;
-
+import kieker.tools.oteltransformer.metrics.SimpleMetrics;
 /**
  * A stage for exporting Kieker traces to OpenTelemetry.
  * 
@@ -161,6 +161,8 @@ public class OpenTelemetryExporterStage extends AbstractConsumerStage<ExecutionT
 
 	@Override
 	protected void execute(final ExecutionTrace trace) throws Exception {
+		SimpleMetrics.incTracesProcessed();
+
 		final Tracer tracer = tracerProvider.get("kieker-import");
 
 		for (final Execution execution : trace.getTraceAsSortedExecutionSet()) {
@@ -200,6 +202,8 @@ public class OpenTelemetryExporterStage extends AbstractConsumerStage<ExecutionT
 
 	private Span createSpan(final Execution execution, final String fullClassname, final SpanBuilder spanBuilder) {
 		final Span span = spanBuilder.startSpan();
+
+		SimpleMetrics.incSpansTransformed();
 
 		try (Scope scope = span.makeCurrent()) {
 			final String serviceName = execution.getAllocationComponent().getExecutionContainer().getName();

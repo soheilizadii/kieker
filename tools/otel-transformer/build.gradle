@@ -12,8 +12,10 @@ targetCompatibility = 11
 
 dependencies {
 	implementation project(":tools")
-	implementation project(":analysis")
-
+	implementation project(":analysis") 
+    
+	implementation 'org.apache.kafka:kafka-clients:3.7.0'
+	
 	implementation 'de.cau.cs.se.teetime:teetime:3.1.1'
 	implementation 'org.slf4j:slf4j-api:2.0.+'
 	implementation "ch.qos.logback:logback-classic:$libLogbackVersion"
